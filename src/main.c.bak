@@ -1,0 +1,1073 @@
+/* Neushoorn headers */
+#include <nh_base.h>
+#include <nh_arena.h>
+#include <nh_vector.h>
+#include <nh_fileio.h>
+
+/* Stdlib headers */
+#include <stdio.h>
+#include <stdlib.h>
+
+/* SDL2 headers */
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_vulkan.h>
+
+/* Vulkan headers */
+#include <vulkan/vulkan.h>
+
+/* Consts */
+#define ARENA_SIZE      1024 * 1024 * 4   /* 4 MiB */
+const char *layers[] = {
+  "VK_LAYER_KHRONOS_validation",
+  "VK_LAYER_NV_optimus"
+};
+const char *inst_extensions[] = {
+  VK_EXT_DEBUG_UTILS_EXTENSION_NAME
+};
+const char *dev_extensions[] = {
+  VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+};
+const f32 queue_family_priority = 1.0f;
+
+/* State */
+struct {
+  nh_arena_t arena;                   /* For memory allocations */
+  nh_vec2i_t size;                    /* The size of the window */
+  bool running;                       /* Is the window still open? */
+  f64 delta_time;                     /* The delta time in seconds */
+  usize ticks;                        /* The amount of times the main loop has run */
+  SDL_Window *window;                 /* The window handle */
+  VkApplicationInfo app_info;         /* The Vulkan application info */
+  VkInstanceCreateInfo inst_cinfo;    /* The Vulkan instance creation info */
+  VkInstance instance;                /* The Vulkan instance */
+  const char **inst_extensions_used;  /* The extension names */
+  u32 inst_extension_count;           /* The extension count */
+  const char **layers_used;           /* The layer names */
+  u32 layer_count;                    /* The layer count */
+  VkDebugUtilsMessengerEXT messenger; /* The debug messenger */
+  VkDebugUtilsMessengerCreateInfoEXT messenger_cinfo; /* The debug messenger creation info */
+  VkSurfaceKHR surface;               /* The window surface */
+  VkPhysicalDevice physical_device;   /* The physical device */
+  VkQueue queue;                      /* The queue */
+  VkDeviceQueueCreateInfo queue_cinfo;/* The queue creation info */
+  u32 queue_family_index;             /* The index of the queue's family */
+  VkDevice device;                    /* The logical device */
+  VkDeviceCreateInfo dev_cinfo;       /* The logical device creation info */
+  const char **dev_extensions_used;   /* The extension names */
+  u32 dev_extension_count;            /* The extension count */
+  VkSurfaceCapabilitiesKHR surf_caps; /* The surface capabilities */
+  VkSurfaceFormatKHR surf_format;     /* The surface format */
+  VkPresentModeKHR present_mode;      /* The present mode */
+  VkExtent2D swap_extent;             /* The swapchain extent */
+  VkSwapchainKHR swapchain;           /* The swapchain */
+  VkSwapchainCreateInfoKHR swapchain_cinfo; /* The swapchain creation info */
+  VkImage *swapchain_images;          /* The swapchain images */
+  VkImageView *swapchain_image_views; /* The swapchain image views */
+  u32 image_count;                    /* The image count */
+  VkShaderModule vert_shader_module;  /* The vertex shader module */
+  VkShaderModule frag_shader_module;  /* The fragment shader module */
+  VkPipelineShaderStageCreateInfo vert_shader_stage_cinfo; /* The vertex shader stage creation info */
+  VkPipelineShaderStageCreateInfo frag_shader_stage_cinfo; /* The fragment shader stage creation info */
+  VkPipelineShaderStageCreateInfo shader_stages[2]; /* The shader stages */
+  VkPipelineDynamicStateCreateInfo dynamic_state_cinfo; /* The dynamic state creation info */
+  VkDynamicState dynamic_states[2];   /* The dynamic state */
+  u32 dynamic_state_count;            /* The dynamic state count */
+  VkPipelineVertexInputStateCreateInfo vertex_input_state_cinfo; /* The vertex input state creation info */
+  VkPipelineInputAssemblyStateCreateInfo input_assembly_state_cinfo; /* The input assembly state creation info */
+  VkPipelineViewportStateCreateInfo viewport_state_cinfo; /* The viewport state creation info */
+  VkViewport viewport;                /* The viewport */
+  VkRect2D scissor;                   /* The scissor */
+  VkPipelineRasterizationStateCreateInfo rasterization_state_cinfo; /* The rasterization state creation info */
+  VkPipelineMultisampleStateCreateInfo multisample_state_cinfo; /* The multisample state creation info */
+  VkPipelineColorBlendAttachmentState color_blend_attachment_state; /* The color blend attachment state */
+  VkPipelineColorBlendStateCreateInfo color_blend_state_cinfo; /* The color blend state creation info */
+  VkPipelineLayout pipeline_layout;   /* The pipeline layout */
+  VkPipelineLayoutCreateInfo pipeline_layout_cinfo; /* The pipeline layout creation info */
+  VkAttachmentDescription color_attachment_desc; /* The color attachment description */
+  VkAttachmentReference color_attachment_ref; /* The color attachment reference */
+  VkSubpassDescription subpass_desc; /* The subpass description */
+  VkRenderPass render_pass;         /* The render pass */
+  VkRenderPassCreateInfo render_pass_cinfo; /* The render pass creation info */
+  VkPipeline graphics_pipeline;     /* The graphics pipeline */
+  VkGraphicsPipelineCreateInfo pipeline_cinfo; /* The graphics pipeline creation info */
+  VkFramebuffer *framebuffers;       /* The framebuffers */
+  VkCommandPool command_pool;        /* The command pool */
+  VkCommandPoolCreateInfo command_pool_cinfo; /* The command pool creation info */
+  VkCommandBuffer command_buffer;    /* The command buffer */
+  VkSemaphore image_available_sem;   /* The image available semaphore */
+  VkSemaphore render_finished_sem;   /* The render finished semaphore */
+  VkFence in_flight_fence;           /* The in flight fence */
+  VkSubpassDependency dependency;    /* The subpass dependency */
+  u32 image_index;
+} state;
+
+/* Create debug messenger */
+VkResult vkCreateDebugUtilsMessengerEXT(
+  VkInstance instance,
+  const VkDebugUtilsMessengerCreateInfoEXT *pCreateInfo,
+  const VkAllocationCallbacks *pAllocator,
+  VkDebugUtilsMessengerEXT *pDebugMessenger
+) {
+  PFN_vkCreateDebugUtilsMessengerEXT _vkCreateDebugUtilsMessengerEXT = 
+    (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+    instance,
+    "vkCreateDebugUtilsMessengerEXT"
+  );
+  if (_vkCreateDebugUtilsMessengerEXT == NULL) {
+    return VK_ERROR_EXTENSION_NOT_PRESENT;
+  }
+  return _vkCreateDebugUtilsMessengerEXT(instance, pCreateInfo, pAllocator, pDebugMessenger);
+}
+/* Destroy debug messenger */
+void vkDestroyDebugUtilsMessengerEXT(
+  VkInstance instance,
+  VkDebugUtilsMessengerEXT debugMessenger,
+  const VkAllocationCallbacks *pAllocator
+) {
+  PFN_vkDestroyDebugUtilsMessengerEXT _vkDestroyDebugUtilsMessengerEXT = 
+    (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+    instance,
+    "vkDestroyDebugUtilsMessengerEXT"
+  );
+  if (_vkDestroyDebugUtilsMessengerEXT == NULL) {
+    return;
+  }
+  _vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, pAllocator);
+}
+
+/* Debug callback */
+static VkBool32 debug_callback(
+  VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+  VkDebugUtilsMessageTypeFlagsEXT messageType,
+  const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
+  void *pUserData
+) {
+  switch (messageSeverity) {
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
+      printf("ERROR: %s\n", pCallbackData->pMessage);
+      break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
+      printf("WARNING: %s\n", pCallbackData->pMessage);
+      break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
+      printf("INFO: %s\n", pCallbackData->pMessage);
+      break;
+    case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT:
+      printf("VERBOSE: %s\n", pCallbackData->pMessage);
+      break;
+    default:
+      printf("UNKNOWN: %s\n", pCallbackData->pMessage);
+      break;
+  }
+  (void)messageType;
+  (void)pUserData;
+  return VK_FALSE;
+}
+
+
+void record_command_buffer(VkCommandBuffer buffer, u32 imageIndex) {
+  VkCommandBufferBeginInfo command_buffer_begin_info;
+  VkRenderPassBeginInfo render_pass_begin_info;
+  VkClearValue clear_color;
+  VkViewport viewport;
+  VkRect2D scissor;
+  command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+  command_buffer_begin_info.pNext = NULL;
+  command_buffer_begin_info.flags = 0;
+  command_buffer_begin_info.pInheritanceInfo = NULL;
+  vkBeginCommandBuffer(buffer, &command_buffer_begin_info);
+  render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+  render_pass_begin_info.pNext = NULL;
+  render_pass_begin_info.renderPass = state.render_pass;
+  render_pass_begin_info.framebuffer = state.framebuffers[imageIndex];
+  render_pass_begin_info.renderArea.offset.x = 0;
+  render_pass_begin_info.renderArea.offset.y = 0;
+  render_pass_begin_info.renderArea.extent = state.swap_extent;
+  clear_color.color.float32[0] = 1.00f;
+  clear_color.color.float32[1] = 0.50f;
+  clear_color.color.float32[2] = 0.25f;
+  clear_color.color.float32[3] = 1.00f;
+  render_pass_begin_info.clearValueCount = 1;
+  render_pass_begin_info.pClearValues = &clear_color;
+  vkCmdBeginRenderPass(buffer, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, state.graphics_pipeline);
+  viewport.x = 0.0f;
+  viewport.y = 0.0f;
+  viewport.width = (float)state.swap_extent.width;
+  viewport.height = (float)state.swap_extent.height;
+  vkCmdSetViewport(buffer, 0, 1, &viewport);
+  scissor.offset.x = 0;
+  scissor.offset.y = 0;
+  scissor.extent = state.swap_extent;
+  vkCmdSetScissor(buffer, 0, 1, &scissor);
+  vkCmdDraw(buffer, 3, 1, 0, 0);
+  vkCmdEndRenderPass(buffer);
+  vkEndCommandBuffer(buffer);
+}
+
+/* Entry point */
+int main(void) {
+  /* Initialize SDL */
+  printf("INFO: Initializing SDL...\n");
+  if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    printf("ERROR: Failed to initialize SDL: %s\n", SDL_GetError());
+    return 1;
+  }
+
+  /* Create arena */
+  printf("INFO: Creating arena...\n");
+  state.arena = nh_arena_create(ARENA_SIZE, malloc(ARENA_SIZE));
+
+  /* Create window */
+  printf("INFO: Creating window...\n");
+  state.size.x = 1280;
+  state.size.y = 720;
+  state.window = SDL_CreateWindow(
+    "Test",
+    SDL_WINDOWPOS_UNDEFINED,
+    SDL_WINDOWPOS_UNDEFINED,
+    state.size.x,
+    state.size.y,
+    SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE
+  );
+
+  /* Get required extensions and check for support of extensions and layers */
+  printf("INFO: Getting required extensions...\n");
+  { /* Get required extensions, query support */
+    const char **required_extensions = NULL;
+    u32 required_extension_count = 0;
+    VkExtensionProperties *extension_properties = NULL;
+    u32 extension_property_count = 0;
+    u32 i, j;
+    /* Get required extensions from SDL2 */
+    SDL_Vulkan_GetInstanceExtensions(state.window, &required_extension_count, NULL);
+    required_extensions = malloc(sizeof(char *) * required_extension_count);
+    SDL_Vulkan_GetInstanceExtensions(state.window, &required_extension_count, required_extensions);
+    state.inst_extensions_used = (const char **)nh_arena_alloc(
+        &state.arena,
+        sizeof(char *) * required_extension_count + NH_ARRLEN(inst_extensions)
+    );
+    /* Copy required extensions */
+    for (i = 0; i < required_extension_count; i++) {
+      state.inst_extensions_used[i] = required_extensions[i];
+    }
+    /* Copy extensions */
+    for (i = 0; i < NH_ARRLEN(inst_extensions); i++) {
+      state.inst_extensions_used[required_extension_count + i] = inst_extensions[i];
+    }
+    state.inst_extension_count = required_extension_count + NH_ARRLEN(inst_extensions);
+    /* Free required extensions */
+    free(required_extensions);
+    /* Query support */
+    vkEnumerateInstanceExtensionProperties(NULL, &extension_property_count, NULL);
+    extension_properties = malloc(sizeof(VkExtensionProperties) * extension_property_count);
+    vkEnumerateInstanceExtensionProperties(NULL, &extension_property_count, extension_properties);
+    for (i = 0; i < state.inst_extension_count; i++) {
+      bool found = false;
+      for (j = 0; j < extension_property_count; j++) {
+        if (strcmp(state.inst_extensions_used[i], extension_properties[j].extensionName) == 0) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        printf("ERROR: Required extension not supported: %s\n", state.inst_extensions_used[i]);
+        exit(1);
+      }
+      printf("INFO: Using extension: %s\n", state.inst_extensions_used[i]);
+    }
+    free(extension_properties);
+  }
+  { /* Query layer support */
+    VkLayerProperties *layer_properties = NULL;
+    u32 layer_property_count = 0;
+    u32 i, j;
+    /* Get layers used directly from const */
+    state.layers_used = layers;
+    state.layer_count = NH_ARRLEN(layers);
+    /* Query support */
+    vkEnumerateInstanceLayerProperties(&layer_property_count, NULL);
+    layer_properties = malloc(sizeof(VkLayerProperties) * layer_property_count);
+    vkEnumerateInstanceLayerProperties(&layer_property_count, layer_properties);
+    for (i = 0; i < state.layer_count; i++) {
+      bool found = false;
+      for (j = 0; j < layer_property_count; j++) {
+        if (strcmp(state.layers_used[i], layer_properties[j].layerName) == 0) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        printf("ERROR: Required layer not supported: %s\n", state.layers_used[i]);
+        exit(1);
+      }
+      printf("INFO: Using layer: %s\n", state.layers_used[i]);
+    }
+    free(layer_properties);
+  }
+
+  /* Create vulkan instance */
+  printf("INFO: Creating vulkan instance...\n");
+  /* Application info */
+  state.app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+  state.app_info.pNext = NULL;
+  state.app_info.pApplicationName = "Test";
+  state.app_info.applicationVersion = 1;
+  state.app_info.pEngineName = "No Engine";
+  state.app_info.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+  state.app_info.apiVersion = VK_API_VERSION_1_0;
+  /* Instance create info */
+  state.inst_cinfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+  state.inst_cinfo.pNext = NULL;
+  state.inst_cinfo.flags = 0;
+  state.inst_cinfo.pApplicationInfo = &state.app_info;
+  state.inst_cinfo.enabledLayerCount = state.layer_count;
+  state.inst_cinfo.ppEnabledLayerNames = state.layers_used;
+  state.inst_cinfo.enabledExtensionCount = state.inst_extension_count;
+  state.inst_cinfo.ppEnabledExtensionNames = state.inst_extensions_used;
+  /* Create instance */
+  vkCreateInstance(&state.inst_cinfo, NULL, &state.instance);
+  NH_ASSERT(state.instance != NULL);
+
+  /* Create debug messenger */
+  printf("INFO: Creating debug messenger...\n");
+  state.messenger_cinfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+  state.messenger_cinfo.pNext = NULL;
+  state.messenger_cinfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+  state.messenger_cinfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+  state.messenger_cinfo.pfnUserCallback = debug_callback;
+  state.messenger_cinfo.pUserData = NULL;
+  vkCreateDebugUtilsMessengerEXT(state.instance, &state.messenger_cinfo, NULL, &state.messenger);
+  NH_ASSERT(state.messenger != NULL);
+
+  /* Create window surface */
+  printf("INFO: Creating window surface...\n");
+  NH_ASSERT(SDL_Vulkan_CreateSurface(state.window, state.instance, &state.surface));
+  NH_ASSERT(state.surface != NULL);
+
+  /* Choose a physical device */
+  {
+    u32 device_count = 0;
+    bool found_device = false;
+    u32 i;
+    VkPhysicalDevice *devices;
+    vkEnumeratePhysicalDevices(state.instance, &device_count, NULL);
+    NH_ASSERT(device_count > 0);
+    devices = malloc(sizeof(VkPhysicalDevice) * device_count);
+    vkEnumeratePhysicalDevices(state.instance, &device_count, devices);
+    for (i = 0; i < device_count; i++) {
+      VkPhysicalDeviceProperties properties;
+      vkGetPhysicalDeviceProperties(devices[i], &properties);
+      if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+        state.physical_device = devices[i];
+        found_device = true;
+        printf("INFO: Selected discrete GPU: %s\n", properties.deviceName);
+        break;
+      }
+      if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+        state.physical_device = devices[i];
+        found_device = true;
+        printf("INFO: Selected integrated GPU: %s\n", properties.deviceName);
+        break;
+      }
+    }
+    if (!found_device) {
+      VkPhysicalDeviceProperties properties;
+      state.physical_device = devices[0];
+      vkGetPhysicalDeviceProperties(state.physical_device, &properties);
+      switch (properties.deviceType) {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:
+          printf("INFO: Selected discrete GPU: %s\n", properties.deviceName);
+          break;
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU:
+          printf("INFO: Selected integrated GPU: %s\n", properties.deviceName);
+          break;
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:
+          printf("INFO: Selected virtual GPU: %s\n", properties.deviceName);
+          break;
+        case VK_PHYSICAL_DEVICE_TYPE_CPU:
+          printf("INFO: Selected CPU: %s\n", properties.deviceName);
+          break;
+        case VK_PHYSICAL_DEVICE_TYPE_OTHER:
+          printf("INFO: Selected unknown device type: %s\n", properties.deviceName);
+          break;
+        default:
+          break;
+      }
+    }
+    free(devices);
+  }
+  /* Find suitable queue family - needs graphics and present support */
+  {
+    u32 queue_family_count = 0;
+    VkQueueFamilyProperties *queue_family_properties = NULL;
+    u32 i;
+    bool found_queue = false;
+    vkGetPhysicalDeviceQueueFamilyProperties(state.physical_device, &queue_family_count, NULL);
+    queue_family_properties = malloc(sizeof(VkQueueFamilyProperties) * queue_family_count);
+    vkGetPhysicalDeviceQueueFamilyProperties(state.physical_device, &queue_family_count, queue_family_properties);
+    for (i = 0; i < queue_family_count; i++) {
+      if (queue_family_properties[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+        /* Check for present support */
+        VkBool32 supported = false;
+        vkGetPhysicalDeviceSurfaceSupportKHR(state.physical_device, i, state.surface, &supported);
+        if (supported) {
+          state.queue_family_index = i;
+          found_queue = true;
+          break;
+        }
+      }
+    }
+    NH_ASSERT(found_queue);
+    printf("INFO: Selected queue family index: %u\n", state.queue_family_index);
+    free(queue_family_properties);
+  }
+
+  /* Check for support of device extensions */
+  {
+    u32 i, j;
+    VkExtensionProperties *extension_properties = NULL;
+    u32 extension_property_count = 0;
+    state.dev_extensions_used = dev_extensions;
+    state.dev_extension_count = NH_ARRLEN(dev_extensions);
+    vkEnumerateDeviceExtensionProperties(state.physical_device, NULL, &extension_property_count, NULL);
+    extension_properties = malloc(sizeof(VkExtensionProperties) * extension_property_count);
+    vkEnumerateDeviceExtensionProperties(state.physical_device, NULL, &extension_property_count, extension_properties);
+    for (i = 0; i < state.dev_extension_count; i++) {
+      bool found = false;
+      for (j = 0; j < extension_property_count; j++) {
+        if (strcmp(state.dev_extensions_used[i], extension_properties[j].extensionName) == 0) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        printf("ERROR: Required extension not supported: %s\n", state.dev_extensions_used[i]);
+        exit(1);
+      }
+      printf("INFO: Using extension: %s\n", state.dev_extensions_used[i]);
+    }
+    free(extension_properties);
+  }
+  /* Create logical device */
+  printf("INFO: Creating logical device...\n");
+  /* Queue create info */
+  state.queue_cinfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+  state.queue_cinfo.pNext = NULL;
+  state.queue_cinfo.queueFamilyIndex = state.queue_family_index;
+  state.queue_cinfo.queueCount = 1;
+  state.queue_cinfo.pQueuePriorities = &queue_family_priority;
+  /* Device create info */
+  state.dev_cinfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+  state.dev_cinfo.pNext = NULL;
+  state.dev_cinfo.flags = 0;
+  state.dev_cinfo.queueCreateInfoCount = 1;
+  state.dev_cinfo.pQueueCreateInfos = &state.queue_cinfo;
+  state.dev_cinfo.enabledLayerCount = 0;
+  state.dev_cinfo.ppEnabledLayerNames = NULL;
+  state.dev_cinfo.enabledExtensionCount = state.dev_extension_count;
+  state.dev_cinfo.ppEnabledExtensionNames = state.dev_extensions_used;
+  state.dev_cinfo.pEnabledFeatures = NULL;
+  vkCreateDevice(state.physical_device, &state.dev_cinfo, NULL, &state.device);
+  NH_ASSERT(state.device != NULL);
+
+  /* Create queue */
+  vkGetDeviceQueue(state.device, state.queue_family_index, 0, &state.queue);
+  NH_ASSERT(state.queue != NULL);
+
+  /* Get surface capabilities, format and present mode */
+  {
+    VkSurfaceFormatKHR *formats = NULL;
+    u32 format_count = 0;
+    VkPresentModeKHR *present_modes = NULL;
+    u32 present_mode_count = 0;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(state.physical_device, state.surface, &state.surf_caps);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(state.physical_device, state.surface, &format_count, NULL);
+    NH_ASSERT(format_count > 0);
+    formats = malloc(sizeof(VkSurfaceFormatKHR) * format_count);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(state.physical_device, state.surface, &format_count, formats);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(state.physical_device, state.surface, &present_mode_count, NULL);
+    NH_ASSERT(present_mode_count > 0);
+    present_modes = malloc(sizeof(VkPresentModeKHR) * present_mode_count);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(state.physical_device, state.surface, &present_mode_count, present_modes);
+    NH_ASSERT(formats != NULL);
+    state.surf_format = formats[0];
+    free(formats);
+    NH_ASSERT(present_modes != NULL);
+    state.present_mode = present_modes[0];
+    free(present_modes);
+  }
+
+  /* Get the swap extent */
+  {
+    if (state.surf_caps.currentExtent.width == NH_MAX_U32
+        || state.surf_caps.currentExtent.height == NH_MAX_U32) {
+      VkExtent2D extent;
+      extent.width = NH_CLAMP(
+          (u32)state.size.x,
+          state.surf_caps.minImageExtent.width,
+          state.surf_caps.maxImageExtent.width
+      );
+      extent.height = NH_CLAMP(
+          (u32)state.size.y,
+          state.surf_caps.minImageExtent.height,
+          state.surf_caps.maxImageExtent.height
+      );
+      state.swap_extent = extent;
+    } else {
+      state.swap_extent = state.surf_caps.currentExtent;
+    }
+    printf("INFO: Swap extent: %dx%d\n", state.swap_extent.width, state.swap_extent.height);
+  }
+
+  /* Create swapchain */
+  printf("INFO: Creating swapchain...\n");
+  /* Get image count */
+  state.image_count = state.surf_caps.minImageCount + 1;
+  state.swapchain_cinfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+  state.swapchain_cinfo.pNext = NULL;
+  state.swapchain_cinfo.flags = 0;
+  state.swapchain_cinfo.surface = state.surface;
+  state.swapchain_cinfo.minImageCount = state.image_count;
+  state.swapchain_cinfo.imageFormat = state.surf_format.format;
+  state.swapchain_cinfo.presentMode = state.present_mode;
+  state.swapchain_cinfo.imageColorSpace = state.surf_format.colorSpace;
+  state.swapchain_cinfo.imageExtent = state.swap_extent;
+  state.swapchain_cinfo.imageArrayLayers = 1;
+  state.swapchain_cinfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  state.swapchain_cinfo.preTransform = state.surf_caps.currentTransform;
+  state.swapchain_cinfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  state.swapchain_cinfo.clipped = VK_TRUE;
+  state.swapchain_cinfo.oldSwapchain = VK_NULL_HANDLE;
+  state.swapchain_cinfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  state.swapchain_cinfo.queueFamilyIndexCount = 0;
+  state.swapchain_cinfo.pQueueFamilyIndices = NULL;
+  vkCreateSwapchainKHR(state.device, &state.swapchain_cinfo, NULL, &state.swapchain);
+  NH_ASSERT(state.swapchain != NULL);
+
+  /* Get swapchain images */
+  printf("INFO: Getting swapchain images...\n");
+  vkGetSwapchainImagesKHR(state.device, state.swapchain, &state.image_count, NULL);
+  NH_ASSERT(state.image_count > 0);
+  state.swapchain_images =
+    (VkImage *)nh_arena_alloc(&state.arena, sizeof(VkImage) * state.image_count);
+  vkGetSwapchainImagesKHR(
+      state.device,
+      state.swapchain,
+      &state.image_count,
+      state.swapchain_images
+  );
+  NH_ASSERT(state.swapchain_images != NULL);
+  printf("INFO: Swapchain images: %d\n", state.image_count);
+
+  /* Create shader modules */
+  /* Vertex shaders */
+
+
+  /* Create image views */
+  printf("INFO: Creating image views...\n");
+  {
+    u32 i;
+    state.swapchain_image_views = 
+      (VkImageView *)nh_arena_alloc(&state.arena, sizeof(VkImageView) * state.image_count);
+    for (i = 0; i < state.image_count; i++) {
+      VkImageViewCreateInfo img_view_cinfo;
+      img_view_cinfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+      img_view_cinfo.pNext = NULL;
+      img_view_cinfo.flags = 0;
+      img_view_cinfo.image = state.swapchain_images[i];
+      img_view_cinfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+      img_view_cinfo.format = state.surf_format.format;
+      img_view_cinfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+      img_view_cinfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+      img_view_cinfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+      img_view_cinfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+      img_view_cinfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      img_view_cinfo.subresourceRange.baseMipLevel = 0;
+      img_view_cinfo.subresourceRange.levelCount = 1;
+      img_view_cinfo.subresourceRange.baseArrayLayer = 0;
+      img_view_cinfo.subresourceRange.layerCount = 1;
+      vkCreateImageView(state.device, &img_view_cinfo, NULL, &state.swapchain_image_views[i]);
+      NH_ASSERT(state.swapchain_image_views[i] != NULL);
+    }
+  }
+
+  /* Create shader modules */
+  printf("INFO: Creating shader modules...\n");
+  {
+    VkShaderModuleCreateInfo vert_cinfo;
+    VkShaderModuleCreateInfo frag_cinfo;
+    char *vert_shader_source;
+    char *frag_shader_source;
+    u32 frag_len, vert_len;
+    frag_len = nh_file_size("bin/frag.spv");
+    vert_len = nh_file_size("bin/vert.spv");
+    NH_ASSERT(frag_len > 0);
+    NH_ASSERT(vert_len > 0);
+    vert_shader_source = malloc(vert_len);
+    frag_shader_source = malloc(frag_len);
+    nh_read_file("bin/frag.spv", (u8 *)frag_shader_source);
+    nh_read_file("bin/vert.spv", (u8 *)vert_shader_source);
+    vert_cinfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    vert_cinfo.pNext = NULL;
+    vert_cinfo.flags = 0;
+    vert_cinfo.codeSize = vert_len - 1;
+    vert_cinfo.pCode = (u32 *)vert_shader_source;
+    vkCreateShaderModule(state.device, &vert_cinfo, NULL, &state.vert_shader_module);
+    NH_ASSERT(state.vert_shader_module != NULL);
+    frag_cinfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    frag_cinfo.pNext = NULL;
+    frag_cinfo.flags = 0;
+    frag_cinfo.codeSize = frag_len - 1;
+    frag_cinfo.pCode = (u32 *)frag_shader_source;
+    vkCreateShaderModule(state.device, &frag_cinfo, NULL, &state.frag_shader_module);
+    NH_ASSERT(state.frag_shader_module != NULL);
+    free(vert_shader_source);
+    free(frag_shader_source);
+  }
+
+  /* Create pipeline layout */
+  printf("INFO: Creating pipeline layout...\n");
+  /* Vertex shader stage create info */
+  printf("INFO: Creating pipeline layout: vertex shader stage...\n");
+  state.vert_shader_stage_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  state.vert_shader_stage_cinfo.pNext = NULL;
+  state.vert_shader_stage_cinfo.flags = 0;
+  state.vert_shader_stage_cinfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+  state.vert_shader_stage_cinfo.module = state.vert_shader_module;
+  state.vert_shader_stage_cinfo.pName = "main";
+  state.vert_shader_stage_cinfo.pSpecializationInfo = NULL;
+  state.shader_stages[0] = state.vert_shader_stage_cinfo;
+  /* Fragment shader stage create info */
+  printf("INFO: Creating pipeline layout: fragment shader stage...\n");
+  state.frag_shader_stage_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  state.frag_shader_stage_cinfo.pNext = NULL;
+  state.frag_shader_stage_cinfo.flags = 0;
+  state.frag_shader_stage_cinfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  state.frag_shader_stage_cinfo.module = state.frag_shader_module;
+  state.frag_shader_stage_cinfo.pName = "main";
+  state.frag_shader_stage_cinfo.pSpecializationInfo = NULL;
+  state.shader_stages[1] = state.frag_shader_stage_cinfo;
+  /* Dynamic state create info */
+  printf("INFO: Creating pipeline layout: dynamic state...\n");
+  state.dynamic_state_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  state.dynamic_state_cinfo.pNext = NULL;
+  state.dynamic_state_cinfo.flags = 0;
+  state.dynamic_state_cinfo.dynamicStateCount = 2;
+  state.dynamic_state_cinfo.pDynamicStates = state.dynamic_states;
+  state.dynamic_states[0] = VK_DYNAMIC_STATE_VIEWPORT;
+  state.dynamic_states[1] = VK_DYNAMIC_STATE_SCISSOR;
+  state.dynamic_state_count = 2;
+  /* Vertex input state create info */
+  printf("INFO: Creating pipeline layout: vertex input state...\n");
+  state.vertex_input_state_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  state.vertex_input_state_cinfo.pNext = NULL;
+  state.vertex_input_state_cinfo.flags = 0;
+  state.vertex_input_state_cinfo.vertexBindingDescriptionCount = 0;
+  state.vertex_input_state_cinfo.pVertexBindingDescriptions = NULL;
+  state.vertex_input_state_cinfo.vertexAttributeDescriptionCount = 0;
+  state.vertex_input_state_cinfo.pVertexAttributeDescriptions = NULL;
+  /* Input assembly state create info */
+  printf("INFO: Creating pipeline layout: input assembly state...\n");
+  state.input_assembly_state_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  state.input_assembly_state_cinfo.pNext = NULL;
+  state.input_assembly_state_cinfo.flags = 0;
+  state.input_assembly_state_cinfo.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  state.input_assembly_state_cinfo.primitiveRestartEnable = VK_FALSE;
+  /* Viewport state create info */
+  printf("INFO: Creating pipeline layout: viewport state...\n");
+  state.viewport.x = 0;
+  state.viewport.y = 0;
+  state.viewport.width = state.swap_extent.width;
+  state.viewport.height = state.swap_extent.height;
+  state.viewport.minDepth = 0.0f;
+  state.viewport.maxDepth = 1.0f;
+  state.scissor.offset.x = 0;
+  state.scissor.offset.y = 0;
+  state.scissor.extent = state.swap_extent;
+  state.viewport_state_cinfo.scissorCount = 1;
+  state.viewport_state_cinfo.pScissors = &state.scissor;
+  state.viewport_state_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  state.viewport_state_cinfo.pNext = NULL;
+  state.viewport_state_cinfo.flags = 0;
+  state.viewport_state_cinfo.viewportCount = 1;
+  state.viewport_state_cinfo.pViewports = &state.viewport;
+  state.viewport_state_cinfo.scissorCount = 1;
+  state.viewport_state_cinfo.pScissors = &state.scissor;
+  /* Rasterization state create info */
+  printf("INFO: Creating pipeline layout: rasterization state...\n");
+  state.rasterization_state_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  state.rasterization_state_cinfo.pNext = NULL;
+  state.rasterization_state_cinfo.flags = 0;
+  state.rasterization_state_cinfo.depthClampEnable = VK_FALSE;
+  state.rasterization_state_cinfo.rasterizerDiscardEnable = VK_FALSE;
+  state.rasterization_state_cinfo.polygonMode = VK_POLYGON_MODE_FILL;
+  state.rasterization_state_cinfo.lineWidth = 1.0f;
+  state.rasterization_state_cinfo.cullMode = VK_CULL_MODE_BACK_BIT;
+  state.rasterization_state_cinfo.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  state.rasterization_state_cinfo.depthBiasEnable = VK_FALSE;
+  state.rasterization_state_cinfo.depthBiasConstantFactor = 0.0f;
+  state.rasterization_state_cinfo.depthBiasClamp = 0.0f;
+  state.rasterization_state_cinfo.depthBiasSlopeFactor = 0.0f;
+  /* Multisample state create info */
+  printf("INFO: Creating pipeline layout: multisample state...\n");
+  state.multisample_state_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  state.multisample_state_cinfo.pNext = NULL;
+  state.multisample_state_cinfo.flags = 0;
+  state.multisample_state_cinfo.sampleShadingEnable = VK_FALSE;
+  state.multisample_state_cinfo.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  state.multisample_state_cinfo.minSampleShading = 1.0f;
+  state.multisample_state_cinfo.pSampleMask = NULL;
+  state.multisample_state_cinfo.alphaToCoverageEnable = VK_FALSE;
+  state.multisample_state_cinfo.alphaToOneEnable = VK_FALSE;
+  /* Color blend state create info */
+  printf("INFO: Creating pipeline layout: color blend state...\n");
+  state.color_blend_attachment_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+  state.color_blend_attachment_state.blendEnable = VK_TRUE;
+  state.color_blend_attachment_state.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+  state.color_blend_attachment_state.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+  state.color_blend_attachment_state.colorBlendOp = VK_BLEND_OP_ADD;
+  state.color_blend_attachment_state.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+  state.color_blend_attachment_state.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+  state.color_blend_attachment_state.alphaBlendOp = VK_BLEND_OP_ADD;
+  state.color_blend_state_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  state.color_blend_state_cinfo.pNext = NULL;
+  state.color_blend_state_cinfo.flags = 0;
+  state.color_blend_state_cinfo.logicOpEnable = VK_FALSE;
+  state.color_blend_state_cinfo.logicOp = VK_LOGIC_OP_COPY;
+  state.color_blend_state_cinfo.attachmentCount = 1;
+  state.color_blend_state_cinfo.pAttachments = &state.color_blend_attachment_state;
+  state.color_blend_state_cinfo.blendConstants[0] = 0.0f;
+  state.color_blend_state_cinfo.blendConstants[1] = 0.0f;
+  state.color_blend_state_cinfo.blendConstants[2] = 0.0f;
+  state.color_blend_state_cinfo.blendConstants[3] = 0.0f;
+  /* Pipeline layout create info */
+  printf("INFO: Creating pipeline layout: creating pipeline layout...\n");
+  state.pipeline_layout_cinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+  state.pipeline_layout_cinfo.pNext = NULL;
+  state.pipeline_layout_cinfo.flags = 0;
+  state.pipeline_layout_cinfo.setLayoutCount = 0;
+  state.pipeline_layout_cinfo.pSetLayouts = NULL;
+  state.pipeline_layout_cinfo.pushConstantRangeCount = 0;
+  state.pipeline_layout_cinfo.pPushConstantRanges = NULL;
+  /* Create pipeline layout */
+  vkCreatePipelineLayout(state.device, &state.pipeline_layout_cinfo, NULL, &state.pipeline_layout);
+  NH_ASSERT(state.pipeline_layout != NULL);
+
+  /* Create color attachment */
+  printf("INFO: Creating color attachment...\n");
+  state.color_attachment_desc.flags = 0;
+  state.color_attachment_desc.format = state.surf_format.format;
+  state.color_attachment_desc.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  state.color_attachment_desc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  state.color_attachment_desc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  state.color_attachment_desc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+  state.color_attachment_desc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  state.color_attachment_desc.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+  state.color_attachment_desc.samples = VK_SAMPLE_COUNT_1_BIT;
+  state.color_attachment_ref.attachment = 0;
+  state.color_attachment_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+  /* Create subpass description */
+  printf("INFO: Creating subpass description...\n");
+  state.subpass_desc.flags = 0;
+  state.subpass_desc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  state.subpass_desc.inputAttachmentCount = 0;
+  state.subpass_desc.pInputAttachments = NULL;
+  state.subpass_desc.colorAttachmentCount = 1;
+  state.subpass_desc.pColorAttachments = &state.color_attachment_ref;
+  state.subpass_desc.pResolveAttachments = NULL;
+  state.subpass_desc.pDepthStencilAttachment = NULL;
+  state.subpass_desc.preserveAttachmentCount = 0;
+  state.subpass_desc.pPreserveAttachments = NULL;
+
+  /* Create render pass */
+  printf("INFO: Creating render pass...\n");
+  {
+    state.dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    state.dependency.dstSubpass = 0;
+    state.dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    state.dependency.srcAccessMask = 0;
+    state.dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    state.dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    state.render_pass_cinfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    state.render_pass_cinfo.pNext = NULL;
+    state.render_pass_cinfo.flags = 0;
+    state.render_pass_cinfo.attachmentCount = 1;
+    state.render_pass_cinfo.pAttachments = &state.color_attachment_desc;
+    state.render_pass_cinfo.subpassCount = 1;
+    state.render_pass_cinfo.pSubpasses = &state.subpass_desc;
+    state.render_pass_cinfo.dependencyCount = 1;
+    state.render_pass_cinfo.pDependencies = &state.dependency;
+    vkCreateRenderPass(state.device, &state.render_pass_cinfo, NULL, &state.render_pass);
+    NH_ASSERT(state.render_pass != NULL);
+  }
+
+  /* Create graphics pipeline */
+  printf("INFO: Creating graphics pipeline...\n");
+  state.pipeline_cinfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  state.pipeline_cinfo.pNext = NULL;
+  state.pipeline_cinfo.flags = 0;
+  state.pipeline_cinfo.stageCount = 2;
+  state.pipeline_cinfo.pStages = state.shader_stages;
+  state.pipeline_cinfo.pVertexInputState = &state.vertex_input_state_cinfo;
+  state.pipeline_cinfo.pInputAssemblyState = &state.input_assembly_state_cinfo;
+  state.pipeline_cinfo.pViewportState = &state.viewport_state_cinfo;
+  state.pipeline_cinfo.pRasterizationState = &state.rasterization_state_cinfo;
+  state.pipeline_cinfo.pMultisampleState = &state.multisample_state_cinfo;
+  state.pipeline_cinfo.pColorBlendState = &state.color_blend_state_cinfo;
+  state.pipeline_cinfo.pDepthStencilState = NULL;
+  state.pipeline_cinfo.pTessellationState = NULL;
+  state.pipeline_cinfo.pDynamicState = &state.dynamic_state_cinfo;
+  state.pipeline_cinfo.layout = state.pipeline_layout;
+  state.pipeline_cinfo.renderPass = state.render_pass;
+  state.pipeline_cinfo.subpass = 0;
+  state.pipeline_cinfo.basePipelineHandle = VK_NULL_HANDLE;
+  state.pipeline_cinfo.basePipelineIndex = -1;
+  vkCreateGraphicsPipelines(state.device, VK_NULL_HANDLE, 1, &state.pipeline_cinfo, NULL, &state.graphics_pipeline);
+  NH_ASSERT(state.graphics_pipeline != NULL);
+
+  /* Create framebuffers */
+  printf("INFO: Creating framebuffers...\n");
+  state.framebuffers = (VkFramebuffer *)nh_arena_alloc(&state.arena, sizeof(VkFramebuffer) * state.image_count);
+  {
+    u32 i;
+    for (i = 0; i < state.image_count; i++) {
+      VkFramebufferCreateInfo framebuffer_cinfo;
+      framebuffer_cinfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+      framebuffer_cinfo.pNext = NULL;
+      framebuffer_cinfo.flags = 0;
+      framebuffer_cinfo.renderPass = state.render_pass;
+      framebuffer_cinfo.attachmentCount = 1;
+      framebuffer_cinfo.pAttachments = &state.swapchain_image_views[i];
+      framebuffer_cinfo.width = state.swap_extent.width;
+      framebuffer_cinfo.height = state.swap_extent.height;
+      framebuffer_cinfo.layers = 1;
+      vkCreateFramebuffer(state.device, &framebuffer_cinfo, NULL, &state.framebuffers[i]);
+      NH_ASSERT(state.framebuffers[i] != NULL);
+    }
+  }
+
+  /* Create command pool */
+  printf("INFO: Creating command pool...\n");
+  state.command_pool_cinfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+  state.command_pool_cinfo.pNext = NULL;
+  state.command_pool_cinfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+  state.command_pool_cinfo.queueFamilyIndex = state.queue_family_index;
+  vkCreateCommandPool(state.device, &state.command_pool_cinfo, NULL, &state.command_pool);
+  NH_ASSERT(state.command_pool != NULL);
+
+  /* Create command buffers */
+  printf("INFO: Creating command buffer...\n");
+  {
+    VkCommandBufferAllocateInfo command_buffer_cinfo;
+    command_buffer_cinfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    command_buffer_cinfo.pNext = NULL;
+    command_buffer_cinfo.commandPool = state.command_pool;
+    command_buffer_cinfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    command_buffer_cinfo.commandBufferCount = state.image_count;
+    vkAllocateCommandBuffers(state.device, &command_buffer_cinfo, &state.command_buffer);
+    NH_ASSERT(state.command_buffer != NULL);
+  }
+
+  /* Create sync objects */
+  printf("INFO: Creating sync objects...\n");
+  {
+    VkSemaphoreCreateInfo image_semaphore_cinfo;
+    VkSemaphoreCreateInfo render_semaphore_cinfo;
+    VkFenceCreateInfo fence_cinfo;
+    image_semaphore_cinfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    image_semaphore_cinfo.pNext = NULL;
+    image_semaphore_cinfo.flags = VK_SEMAPHORE_TYPE_BINARY;
+    render_semaphore_cinfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    render_semaphore_cinfo.pNext = NULL;
+    render_semaphore_cinfo.flags = VK_SEMAPHORE_TYPE_BINARY;
+    fence_cinfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fence_cinfo.pNext = NULL;
+    fence_cinfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    vkCreateSemaphore(state.device, &image_semaphore_cinfo, NULL, &state.image_available_sem);
+    NH_ASSERT(state.image_available_sem != NULL);
+    vkCreateSemaphore(state.device, &render_semaphore_cinfo, NULL, &state.render_finished_sem);
+    NH_ASSERT(state.render_finished_sem != NULL);
+    vkCreateFence(state.device, &fence_cinfo, NULL, &state.in_flight_fence);
+    NH_ASSERT(state.in_flight_fence != NULL);
+  }
+
+  /* Main loop */
+  state.running = true;
+  state.ticks = 0;
+  state.image_index = 0;
+  while (state.running) {
+    /* Variables */
+    u64 end, start;
+    SDL_Event event;
+
+    /* Delta time */
+    start = SDL_GetPerformanceCounter();
+
+    /* Handle events */
+    while (SDL_PollEvent(&event)) {
+      if (event.type == SDL_QUIT) {
+        state.running = false;
+      }
+      if (event.type == SDL_WINDOWEVENT) {
+        if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
+          state.size.x = event.window.data1;
+          state.size.y = event.window.data2;
+        }
+      }
+    }
+
+    /* Draw frame */
+    {
+      /* Variables */
+      VkSubmitInfo submit_info;
+      VkSemaphore wait_semaphores[1];
+      VkSemaphore signal_semaphores[1];
+      VkPipelineStageFlags wait_stages[1];
+      VkPresentInfoKHR present_info;
+      VkSwapchainKHR swapchains[1];
+      wait_semaphores[0] = state.image_available_sem;
+      signal_semaphores[0] = state.render_finished_sem;
+      wait_stages[0] = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+      swapchains[0] = state.swapchain;
+      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      submit_info.pNext = NULL;
+      submit_info.waitSemaphoreCount = 1;
+      submit_info.pWaitSemaphores = wait_semaphores;
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers = &state.command_buffer;
+      submit_info.signalSemaphoreCount = 1;
+      submit_info.pSignalSemaphores = signal_semaphores;
+      submit_info.pWaitDstStageMask = wait_stages;
+      present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+      present_info.pNext = NULL;
+      present_info.waitSemaphoreCount = 1;
+      present_info.pWaitSemaphores = signal_semaphores;
+      present_info.swapchainCount = 1;
+      present_info.pSwapchains = swapchains;
+      present_info.pImageIndices = &state.image_index;
+      present_info.pResults = NULL;
+
+      /* Wait for previous frame to finish */
+      vkWaitForFences(state.device, 1, &state.in_flight_fence, VK_TRUE, UINT64_MAX);
+      vkResetFences(state.device, 1, &state.in_flight_fence);
+
+      /* Get image index */
+      vkAcquireNextImageKHR(
+          state.device,
+          state.swapchain,
+          UINT64_MAX,
+          state.image_available_sem, 
+          VK_NULL_HANDLE,
+          &state.image_index
+      );
+
+      /* Reset command buffer */
+      vkResetCommandBuffer(state.command_buffer, 0);
+      record_command_buffer(state.command_buffer, state.image_index);
+
+      /* Submit command buffer */
+      vkQueueSubmit(state.queue, 1, &submit_info, state.in_flight_fence);
+
+      /* Present image */
+      vkQueuePresentKHR(state.queue, &present_info);
+    }
+
+    /* Delta time - part 2 */
+    end = SDL_GetPerformanceCounter();
+    state.delta_time = (f64)(end - start) / (f64)SDL_GetPerformanceFrequency();
+    if (state.ticks % 100000 == 0) {
+      f32 fps = 1.0f / state.delta_time;
+      printf("INFO: Delta time: %f, FPS: %f\n", state.delta_time, fps);
+    }
+    state.ticks++;
+  }
+
+  /* Wait for device to finish */
+  printf("INFO: Waiting for device to finish...\n");
+  vkDeviceWaitIdle(state.device);
+
+  /* Destroy sync objects */
+  printf("INFO: Destroying sync objects...\n");
+  vkDestroyFence(state.device, state.in_flight_fence, NULL);
+  vkDestroySemaphore(state.device, state.render_finished_sem, NULL);
+  vkDestroySemaphore(state.device, state.image_available_sem, NULL);
+
+  /* Destroy command pool */
+  printf("INFO: Destroying command pool...\n");
+  vkDestroyCommandPool(state.device, state.command_pool, NULL);
+
+  /* Destroy framebuffers */
+  printf("INFO: Destroying framebuffers...\n");
+  {
+    u32 i;
+    for (i = 0; i < state.image_count; i++) {
+      vkDestroyFramebuffer(state.device, state.framebuffers[i], NULL);
+    }
+  }
+
+  /* Destroy graphics pipeline */
+  printf("INFO: Destroying graphics pipeline...\n");
+  vkDestroyPipeline(state.device, state.graphics_pipeline, NULL);
+
+  /* Destroy render pass */
+  printf("INFO: Destroying render pass...\n");
+  vkDestroyRenderPass(state.device, state.render_pass, NULL);
+  
+  /* Destroy pipeline layout */
+  printf("INFO: Destroying pipeline layout...\n");
+  vkDestroyPipelineLayout(state.device, state.pipeline_layout, NULL);
+
+  /* Destroy shader modules */
+  printf("INFO: Destroying shader modules...\n");
+  {
+    vkDestroyShaderModule(state.device, state.frag_shader_module, NULL);
+    vkDestroyShaderModule(state.device, state.vert_shader_module, NULL);
+  }
+
+  /* Destroy image views */
+  printf("INFO: Destroying image views...\n");
+  {
+    u32 i;
+    for (i = 0; i < state.image_count; i++) {
+      vkDestroyImageView(state.device, state.swapchain_image_views[i], NULL);
+    }
+  }
+
+  /* Destroy swapchain */
+  printf("INFO: Destroying swapchain...\n");
+  vkDestroySwapchainKHR(state.device, state.swapchain, NULL);
+
+  /* Destroy device */
+  printf("INFO: Destroying logical device...\n");
+  vkDestroyDevice(state.device, NULL);
+
+  /* Destroy surface */
+  printf("INFO: Destroying window surface...\n");
+  vkDestroySurfaceKHR(state.instance, state.surface, NULL);
+
+  /* Destroy debug messenger */
+  printf("INFO: Destroying debug messenger...\n");
+  vkDestroyDebugUtilsMessengerEXT(state.instance, state.messenger, NULL);
+
+  /* Destroy vulkan instance */
+  printf("INFO: Destroying vulkan instance...\n");
+  vkDestroyInstance(state.instance, NULL);
+
+  /* Destroy window */
+  printf("INFO: Destroying window...\n");
+  SDL_DestroyWindow(state.window);
+  state.window = NULL;
+  state.running = false;
+
+  /* Free arena */
+  printf("INFO: Freeing arena...\n");
+  free(state.arena.start);
+  nh_arena_free(&state.arena);
+
+  /* Shutdown SDL */
+  printf("INFO: Shutting down SDL...\n");
+  SDL_Quit();
+  return 0;
+}

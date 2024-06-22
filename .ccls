@@ -1,0 +1,7 @@
+-ansi
+-Wpedantic
+-Wall
+-Wextra
+-I./neushoorn2/include/
+-DDEBUG
+-DNH_INCLUDE_STDLIB
